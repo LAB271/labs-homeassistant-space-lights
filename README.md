@@ -37,6 +37,10 @@ Install via HACS as a custom repository (point HACS at this repo URL), or copy `
 
 Enttec LED Mapper on the Lab271 AV network, driving the lab's stage LED strips. Hosts are configured per-instance via the HA UI.
 
+## Naming
+
+Hostnames for the HA host and any networked Enttec controller follow the [Lab271 naming convention](https://github.com/Lab271/labs-infra-overview/blob/main/naming.md). The HA host itself uses `homeassistant` as a grandfathered exception per HA's own default.
+
 ## Dependencies
 
 - Home Assistant 2024.x or newer (config flow + `async_forward_entry_setups`).
