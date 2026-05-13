@@ -1,5 +1,7 @@
 """Art-Net Relay light platform."""
 
+import asyncio
+import json
 import logging
 from typing import Any
 
@@ -24,6 +26,8 @@ _LOGGER = logging.getLogger(__name__)
 
 EFFECTS = ["rainbow", "chase", "breathe", "strobe", "police", "fire", "sparkle", "wave"]
 
+SSE_RECONNECT_DELAY = 5
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -40,7 +44,7 @@ async def async_setup_entry(
 class ArtnetRelayLight(LightEntity):
     """A whole-relay light entity controlled via the artnet-relay /all endpoint."""
 
-    _attr_assumed_state = True
+    _attr_should_poll = False
     _attr_color_mode = ColorMode.RGB
     _attr_supported_color_modes = {ColorMode.RGB}
     _attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.EFFECT
@@ -56,6 +60,8 @@ class ArtnetRelayLight(LightEntity):
         self._attr_brightness = 255
         self._attr_rgb_color = (255, 255, 255)
         self._attr_effect = None
+        self._attr_available = False
+        self._sse_task: asyncio.Task | None = None
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -69,6 +75,17 @@ class ArtnetRelayLight(LightEntity):
     @property
     def _base_url(self) -> str:
         return f"http://{self._host}:{self._port}"
+
+    async def async_added_to_hass(self) -> None:
+        self._sse_task = self._hass.loop.create_task(self._sse_loop())
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._sse_task and not self._sse_task.done():
+            self._sse_task.cancel()
+            try:
+                await self._sse_task
+            except asyncio.CancelledError:
+                pass
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the lights on, applying any color/brightness/transition/effect kwargs."""
@@ -86,19 +103,13 @@ class ArtnetRelayLight(LightEntity):
 
         if ATTR_EFFECT in kwargs and kwargs[ATTR_EFFECT] in EFFECTS:
             effect = kwargs[ATTR_EFFECT]
-            if await self._post(f"/effects/{effect}", json=body):
-                self._attr_effect = effect
-                self._attr_is_on = True
-                self.async_write_ha_state()
+            await self._post(f"/effects/{effect}", json=body)
             return
 
         if ATTR_TRANSITION in kwargs:
             body["transition_ms"] = int(kwargs[ATTR_TRANSITION] * 1000)
 
-        if await self._post("/all", json=body):
-            self._attr_effect = None
-            self._attr_is_on = True
-            self.async_write_ha_state()
+        await self._post("/all", json=body)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the lights off by fading brightness to zero (honours transition)."""
@@ -111,10 +122,7 @@ class ArtnetRelayLight(LightEntity):
         if ATTR_TRANSITION in kwargs:
             body["transition_ms"] = int(kwargs[ATTR_TRANSITION] * 1000)
 
-        if await self._post("/all", json=body):
-            self._attr_effect = None
-            self._attr_is_on = False
-            self.async_write_ha_state()
+        await self._post("/all", json=body)
 
     async def _post(self, path: str, json: dict | None = None) -> bool:
         url = f"{self._base_url}{path}"
@@ -130,3 +138,55 @@ class ArtnetRelayLight(LightEntity):
         except aiohttp.ClientError as e:
             _LOGGER.error("POST %s failed: %s", url, e)
             return False
+
+    async def _sse_loop(self) -> None:
+        url = f"{self._base_url}/events"
+        session = async_get_clientsession(self._hass)
+        while True:
+            try:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=None, sock_read=None),
+                ) as resp:
+                    resp.raise_for_status()
+                    while True:
+                        line = await resp.content.readline()
+                        if not line:
+                            break
+                        decoded = line.decode("utf-8").strip()
+                        if not decoded.startswith("data:"):
+                            continue
+                        try:
+                            payload = json.loads(decoded[5:].strip())
+                        except json.JSONDecodeError:
+                            continue
+                        if payload.get("type") == "state":
+                            self._apply_snapshot(payload.get("state") or {})
+                            self._attr_available = True
+                            self.async_write_ha_state()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                _LOGGER.warning("SSE stream to %s dropped (%s); reconnecting in %ds",
+                                url, e, SSE_RECONNECT_DELAY)
+                if self._attr_available:
+                    self._attr_available = False
+                    self.async_write_ha_state()
+                await asyncio.sleep(SSE_RECONNECT_DELAY)
+
+    def _apply_snapshot(self, state: dict) -> None:
+        strips = state.get("strips") or []
+        if strips:
+            first = strips[0]
+            rgb = first.get("rgb")
+            if isinstance(rgb, list) and len(rgb) == 3:
+                self._attr_rgb_color = tuple(rgb)
+            bri = first.get("brightness")
+            if isinstance(bri, (int, float)):
+                self._attr_brightness = max(0, min(255, int(round(bri * 255))))
+        self._attr_effect = state.get("effect")
+        any_on = any(
+            isinstance(s.get("brightness"), (int, float)) and s["brightness"] > 0
+            for s in strips
+        )
+        self._attr_is_on = bool(self._attr_effect) or any_on

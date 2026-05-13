@@ -4,7 +4,7 @@ Home Assistant custom integration that drives RGB lighting installations through
 
 ## Status
 
-Active. Drives a Lab271 Art-Net Relay over its REST API. One whole-relay `light` entity per config entry exposes RGB color, brightness, transition, and the relay's 8 named effects (rainbow, chase, breathe, strobe, police, fire, sparkle, wave) via HA's standard light controls. Per-strip / per-group addressing and scenes are not wired up yet.
+Active. Drives a Lab271 Art-Net Relay over its REST API and subscribes to the relay's `/events` SSE stream for real-time state. One whole-relay `light` entity per config entry exposes RGB color, brightness, transition, and the relay's 8 named effects (rainbow, chase, breathe, strobe, police, fire, sparkle, wave) via HA's standard light controls. State reflects the relay's first strip; external changes (web UI, other clients) propagate to HA without polling. Per-strip / per-group addressing and scenes are not wired up yet.
 
 ## Rename history
 
